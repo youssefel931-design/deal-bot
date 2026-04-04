@@ -33,21 +33,32 @@ def send(msg):
 
 def check(seen):
     try:
+        print("Bot läuft...")
+
         r = requests.get(URL, headers=HEADERS, timeout=10)
+        print("Seite geladen:", r.status_code)
+
         soup = BeautifulSoup(r.text, "html.parser")
 
         links = soup.find_all("a")
+        print("Links gefunden:", len(links))
 
         new_seen = set(seen)
 
         for link in links:
             href = link.get("href")
 
+            if href:
+                print("Link:", href)
+
             if href and "/anzeige/" in href:
                 full_link = "https://www.mainz-tauschen-verschenken.de" + href
 
+                print("Anzeige gefunden:", full_link)
+
                 if full_link not in seen:
                     new_seen.add(full_link)
+                    print("Sende Telegram:", full_link)
                     send("🆕 Neue Anzeige:\n" + full_link)
 
         return new_seen
