@@ -40,26 +40,31 @@ def check(seen):
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        links = soup.find_all("a")
-        print("Links gefunden:", len(links))
+        links = soup.find_all("a", href=True)
 
         new_seen = set(seen)
+        found = 0
 
         for link in links:
-            href = link.get("href")
+            href = link["href"]
 
-            if href:
-                print("Link:", href)
+            # NUR echte Anzeigen
+            if "_i" in href:
+                full_link = href
 
-            if href and "/anzeige/" in href:
-                full_link = "https://www.mainz-tauschen-verschenken.de" + href
-
-                print("Anzeige gefunden:", full_link)
+                # fix für // links
+                if href.startswith("//"):
+                    full_link = "https:" + href
 
                 if full_link not in seen:
+                    found += 1
                     new_seen.add(full_link)
-                    print("Sende Telegram:", full_link)
+
+                    print("Neue Anzeige:", full_link)
+
                     send("🆕 Neue Anzeige:\n" + full_link)
+
+        print("Neue gefunden:", found)
 
         return new_seen
 
