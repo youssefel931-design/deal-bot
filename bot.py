@@ -1,7 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
-import time
 import os
+from datetime import datetime
 
 URL = "https://www.mainz-tauschen-verschenken.de/"
 
@@ -32,31 +32,27 @@ def send(msg):
 
 
 def check(seen):
-    try:
-        r = requests.get(URL, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
+    r = requests.get(URL, headers=HEADERS, timeout=10)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-        ads = soup.select("article")
+    ads = soup.select("article")
 
-        new_seen = set(seen)
+    new_seen = set(seen)
 
-        for ad in ads:
-            text = ad.get_text(strip=True)
+    for ad in ads:
+        text = ad.get_text(strip=True)
 
-            if text not in seen:
-                new_seen.add(text)
-                send("🆕 Neue Anzeige:\n" + text)
+        if text not in seen:
+            new_seen.add(text)
+            send("🆕 Neue Anzeige:\n" + text)
 
-        return new_seen
-
-    except Exception as e:
-        print("Fehler:", e)
-        return seen
+    return new_seen
 
 
 seen = load_seen()
 
-while True:
-    seen = check(seen)
-    save_seen(seen)
-    time.sleep(30)
+seen = check(seen)
+
+save_seen(seen)
+
+print("Check fertig")
