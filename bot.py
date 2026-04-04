@@ -32,21 +32,29 @@ def send(msg):
 
 
 def check(seen):
-    r = requests.get(URL, headers=HEADERS, timeout=10)
-    soup = BeautifulSoup(r.text, "html.parser")
+    try:
+        r = requests.get(URL, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
 
-    ads = soup.select("article")
+        links = soup.find_all("a")
 
-    new_seen = set(seen)
+        new_seen = set(seen)
 
-    for ad in ads:
-        text = ad.get_text(strip=True)
+        for link in links:
+            href = link.get("href")
 
-        if text not in seen:
-            new_seen.add(text)
-            send("🆕 Neue Anzeige:\n" + text)
+            if href and "/anzeige/" in href:
+                full_link = "https://www.mainz-tauschen-verschenken.de" + href
 
-    return new_seen
+                if full_link not in seen:
+                    new_seen.add(full_link)
+                    send("🆕 Neue Anzeige:\n" + full_link)
+
+        return new_seen
+
+    except Exception as e:
+        print("Fehler:", e)
+        return seen
 
 
 seen = load_seen()
