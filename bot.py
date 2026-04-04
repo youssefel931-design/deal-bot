@@ -43,26 +43,30 @@ def check(seen):
         links = soup.find_all("a", href=True)
 
         new_seen = set(seen)
+        current_links = set()  # 👈 NEU (gegen doppelte Links)
         found = 0
 
         for link in links:
             href = link["href"]
 
-            # NUR echte Anzeigen
             if "_i" in href:
-                full_link = href
-
                 # fix für // links
                 if href.startswith("//"):
-                    full_link = "https:" + href
+                    href = "https:" + href
 
-                if full_link not in seen:
+                # 👇 verhindert doppelte auf EINER Seite
+                if href in current_links:
+                    continue
+
+                current_links.add(href)
+
+                # 👇 verhindert doppelte über mehrere Runs
+                if href not in seen:
                     found += 1
-                    new_seen.add(full_link)
+                    new_seen.add(href)
 
-                    print("Neue Anzeige:", full_link)
-
-                    send("🆕 Neue Anzeige:\n" + full_link)
+                    print("Neue Anzeige:", href)
+                    send("🆕 Neue Anzeige:\n" + href)
 
         print("Neue gefunden:", found)
 
@@ -71,7 +75,6 @@ def check(seen):
     except Exception as e:
         print("Fehler:", e)
         return seen
-
 
 seen = load_seen()
 
