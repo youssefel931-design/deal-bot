@@ -1,3 +1,7 @@
 print("START OK")
 
-input("blocking...")
+import time
+
+while True:
+    print("ALIVE")
+    time.sleep(5)
