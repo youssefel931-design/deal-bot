@@ -1,6 +1,3 @@
-print("ICH LAUFE!!!")
+print("START OK")
 
-import time
-while True:
-    print("alive", time.time())
-    time.sleep(5)
+input("blocking...")
