@@ -24,7 +24,7 @@ HEADERS = {
     )
 }
 
-STATE_FILE = Path("state.json")
+STATE_FILE = Path("/data/state.json")
 REQUEST_TIMEOUT = 20
 
 
