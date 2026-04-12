@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ HEADERS = {
 
 STATE_FILE = Path("/data/state.json")
 REQUEST_TIMEOUT = 20
+TELEGRAM_CAPTION_LIMIT = 1024
 
 
 def require_env(name: str) -> str:
@@ -85,10 +87,153 @@ def extract_listing_urls(source_url: str, html: str) -> list[str]:
     return found_urls
 
 
+def clean_text(value: str) -> str:
+    return " ".join(value.split()).strip()
+
+
+def first_meta_content(soup: BeautifulSoup, attrs_list: list[dict[str, str]]) -> str | None:
+    for attrs in attrs_list:
+        tag = soup.find("meta", attrs=attrs)
+        if tag and tag.get("content"):
+            return clean_text(tag["content"])
+    return None
+
+
+def extract_phone_numbers(text: str) -> list[str]:
+    matches = re.findall(r"(?:\+?\d[\d\s\/().-]{6,}\d)", text)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+
+    for match in matches:
+        normalized = clean_text(match)
+        if normalized not in seen:
+            seen.add(normalized)
+            cleaned.append(normalized)
+
+    return cleaned
+
+
+def extract_location(title: str, description: str, page_text: str) -> str:
+    for text in [title, description, page_text]:
+        if " - " in text:
+            parts = [clean_text(part) for part in text.split(" - ") if clean_text(part)]
+            if len(parts) >= 2:
+                return parts[-1]
+
+    patterns = [
+        r"\bOrt[:\s]+([A-ZÄÖÜa-zäöüß0-9,\-\/(). ]{3,60})",
+        r"\bStandort[:\s]+([A-ZÄÖÜa-zäöüß0-9,\-\/(). ]{3,60})",
+        r"\bPLZ[:\s]+([0-9]{5}[A-ZÄÖÜa-zäöüß0-9,\-\/(). ]{0,40})",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, page_text)
+        if match:
+            return clean_text(match.group(1))
+
+    return ""
+
+
+def fetch_listing_details(url: str) -> dict[str, str]:
+    response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    page_text = clean_text(soup.get_text(" ", strip=True))
+
+    title = (
+        first_meta_content(
+            soup,
+            [{"property": "og:title"}, {"name": "twitter:title"}],
+        )
+        or (clean_text(soup.find("h1").get_text(" ", strip=True)) if soup.find("h1") else "")
+        or clean_text(soup.title.get_text(" ", strip=True))
+    )
+
+    description = (
+        first_meta_content(
+            soup,
+            [{"property": "og:description"}, {"name": "description"}, {"name": "twitter:description"}],
+        )
+        or ""
+    )
+
+    if not description:
+        for selector in ["article", ".content", ".description", ".item-description", "main"]:
+            node = soup.select_one(selector)
+            if node:
+                text = clean_text(node.get_text(" ", strip=True))
+                if text and text != title:
+                    description = text
+                    break
+
+    image_url = first_meta_content(
+        soup,
+        [{"property": "og:image"}, {"name": "twitter:image"}],
+    )
+
+    if not image_url:
+        image = soup.find("img")
+        if image and image.get("src"):
+            image_url = urljoin(url, image["src"])
+
+    phones = extract_phone_numbers(page_text)
+    location = extract_location(title, description, page_text)
+
+    contact_parts: list[str] = []
+    if location:
+        contact_parts.append("Ort: " + location)
+    if phones:
+        contact_parts.append("Telefon: " + ", ".join(phones[:2]))
+    if not phones:
+        contact_parts.append("Kontakt: nur ueber Kontaktformular")
+
+    return {
+        "title": title or "Neue Anzeige",
+        "description": description,
+        "image_url": image_url or "",
+        "contact": "\n".join(contact_parts),
+    }
+
+
+def build_message(source_name: str, url: str, details: dict[str, str]) -> str:
+    lines = [f"Neue Anzeige auf {source_name}", details["title"]]
+
+    description = clean_text(details.get("description", ""))
+    if description:
+        if len(description) > 500:
+            description = description[:497].rstrip() + "..."
+        lines.append("")
+        lines.append(description)
+
+    contact = details.get("contact", "").strip()
+    if contact:
+        lines.append("")
+        lines.append(contact)
+
+    lines.append("")
+    lines.append(url)
+
+    return "\n".join(lines)
+
+
 def send_telegram_message(token: str, chat_id: str, message: str) -> None:
     response = requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
         data={"chat_id": chat_id, "text": message, "disable_web_page_preview": "true"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+
+
+def send_telegram_photo(token: str, chat_id: str, photo_url: str, caption: str) -> None:
+    response = requests.post(
+        f"https://api.telegram.org/bot{token}/sendPhoto",
+        data={
+            "chat_id": chat_id,
+            "photo": photo_url,
+            "caption": caption[:TELEGRAM_CAPTION_LIMIT],
+        },
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
@@ -129,13 +274,23 @@ def process_source(
 
     bootstrap_source(state, source_name, listings)
     previous = set(state.get(source_name, []))
-
     new_listings = [url for url in listings if url not in previous]
 
     for url in new_listings:
-        message = f"Neue Anzeige auf {source_name}:\n{url}"
-        send_telegram_message(token, chat_id, message)
-        print(f"[{source_name}] Gesendet: {url}")
+        try:
+            details = fetch_listing_details(url)
+            message = build_message(source_name, url, details)
+
+            if details.get("image_url"):
+                send_telegram_photo(token, chat_id, details["image_url"], message)
+            else:
+                send_telegram_message(token, chat_id, message)
+
+            print(f"[{source_name}] Gesendet: {url}")
+        except Exception as exc:
+            fallback_message = f"Neue Anzeige auf {source_name}:\n{url}"
+            send_telegram_message(token, chat_id, fallback_message)
+            print(f"[{source_name}] Detailfehler ({exc}). Fallback gesendet: {url}")
 
     state[source_name] = listings
 
@@ -165,3 +320,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
