@@ -65,7 +65,6 @@ def normalize_listing_url(base_url: str, href: str) -> str | None:
         return None
 
     full_url = urljoin(base_url, href)
-
     if "_i" not in full_url:
         return None
 
@@ -134,6 +133,74 @@ def extract_location(title: str, description: str, page_text: str) -> str:
     return ""
 
 
+def looks_like_noise(text: str) -> bool:
+    lowered = text.lower()
+    noise_markers = [
+        "rubriken",
+        "kategorien",
+        "inserat aufgeben",
+        "inserat bearbeiten",
+        "inserat löschen",
+        "kontaktformular",
+        "nutzungsbedingungen",
+        "datenschutzerklärung",
+        "impressum",
+        "alle ",
+        "verschenken suchen tauschen",
+    ]
+    return any(marker in lowered for marker in noise_markers)
+
+
+def pick_description(soup: BeautifulSoup, title: str) -> str:
+    candidates: list[str] = []
+
+    meta_description = first_meta_content(
+        soup,
+        [{"property": "og:description"}, {"name": "description"}, {"name": "twitter:description"}],
+    )
+    if meta_description:
+        candidates.append(meta_description)
+
+    selectors = [
+        ".detail",
+        ".details",
+        ".description",
+        ".item-description",
+        ".content",
+        "article",
+        "main",
+    ]
+
+    for selector in selectors:
+        for node in soup.select(selector):
+            text = clean_text(node.get_text(" ", strip=True))
+            if text:
+                candidates.append(text)
+
+    best = ""
+    for text in candidates:
+        if not text or text == title:
+            continue
+        if looks_like_noise(text):
+            continue
+        if len(text) < 20:
+            continue
+        best = text
+        break
+
+    if not best:
+        return ""
+
+    title_index = best.lower().find(title.lower())
+    if title and title_index == 0:
+        best = clean_text(best[len(title):])
+
+    if len(best) > 280:
+        best = best[:277].rstrip() + "..."
+
+    return best
+
+
 def fetch_listing_details(url: str) -> dict[str, str]:
     response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
@@ -142,30 +209,12 @@ def fetch_listing_details(url: str) -> dict[str, str]:
     page_text = clean_text(soup.get_text(" ", strip=True))
 
     title = (
-        first_meta_content(
-            soup,
-            [{"property": "og:title"}, {"name": "twitter:title"}],
-        )
+        first_meta_content(soup, [{"property": "og:title"}, {"name": "twitter:title"}])
         or (clean_text(soup.find("h1").get_text(" ", strip=True)) if soup.find("h1") else "")
         or clean_text(soup.title.get_text(" ", strip=True))
     )
 
-    description = (
-        first_meta_content(
-            soup,
-            [{"property": "og:description"}, {"name": "description"}, {"name": "twitter:description"}],
-        )
-        or ""
-    )
-
-    if not description:
-        for selector in ["article", ".content", ".description", ".item-description", "main"]:
-            node = soup.select_one(selector)
-            if node:
-                text = clean_text(node.get_text(" ", strip=True))
-                if text and text != title:
-                    description = text
-                    break
+    description = pick_description(soup, title)
 
     image_url = first_meta_content(
         soup,
@@ -180,19 +229,19 @@ def fetch_listing_details(url: str) -> dict[str, str]:
     phones = extract_phone_numbers(page_text)
     location = extract_location(title, description, page_text)
 
-    contact_parts: list[str] = []
+    info_parts: list[str] = []
     if location:
-        contact_parts.append("Ort: " + location)
+        info_parts.append("Ort: " + location)
     if phones:
-        contact_parts.append("Telefon: " + ", ".join(phones[:2]))
-    if not phones:
-        contact_parts.append("Kontakt: nur ueber Kontaktformular")
+        info_parts.append("Telefon: " + ", ".join(phones[:2]))
+    else:
+        info_parts.append("Kontakt: nur ueber Kontaktformular")
 
     return {
         "title": title or "Neue Anzeige",
         "description": description,
         "image_url": image_url or "",
-        "contact": "\n".join(contact_parts),
+        "info": "\n".join(info_parts),
     }
 
 
@@ -201,15 +250,13 @@ def build_message(source_name: str, url: str, details: dict[str, str]) -> str:
 
     description = clean_text(details.get("description", ""))
     if description:
-        if len(description) > 500:
-            description = description[:497].rstrip() + "..."
         lines.append("")
         lines.append(description)
 
-    contact = details.get("contact", "").strip()
-    if contact:
+    info = details.get("info", "").strip()
+    if info:
         lines.append("")
-        lines.append(contact)
+        lines.append(info)
 
     lines.append("")
     lines.append(url)
@@ -320,4 +367,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
