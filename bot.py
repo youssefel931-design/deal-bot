@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -98,123 +97,20 @@ def first_meta_content(soup: BeautifulSoup, attrs_list: list[dict[str, str]]) ->
     return None
 
 
-def extract_phone_numbers(text: str) -> list[str]:
-    matches = re.findall(r"(?:\+?\d[\d\s\/().-]{6,}\d)", text)
-    cleaned: list[str] = []
-    seen: set[str] = set()
-
-    for match in matches:
-        normalized = clean_text(match)
-        if normalized not in seen:
-            seen.add(normalized)
-            cleaned.append(normalized)
-
-    return cleaned
-
-
-def extract_location(title: str, description: str, page_text: str) -> str:
-    for text in [title, description, page_text]:
-        if " - " in text:
-            parts = [clean_text(part) for part in text.split(" - ") if clean_text(part)]
-            if len(parts) >= 2:
-                return parts[-1]
-
-    patterns = [
-        r"\bOrt[:\s]+([A-ZÄÖÜa-zäöüß0-9,\-\/(). ]{3,60})",
-        r"\bStandort[:\s]+([A-ZÄÖÜa-zäöüß0-9,\-\/(). ]{3,60})",
-        r"\bPLZ[:\s]+([0-9]{5}[A-ZÄÖÜa-zäöüß0-9,\-\/(). ]{0,40})",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, page_text)
-        if match:
-            return clean_text(match.group(1))
-
-    return ""
-
-
-def looks_like_noise(text: str) -> bool:
-    lowered = text.lower()
-    noise_markers = [
-        "rubriken",
-        "kategorien",
-        "inserat aufgeben",
-        "inserat bearbeiten",
-        "inserat löschen",
-        "kontaktformular",
-        "nutzungsbedingungen",
-        "datenschutzerklärung",
-        "impressum",
-        "alle ",
-        "verschenken suchen tauschen",
-    ]
-    return any(marker in lowered for marker in noise_markers)
-
-
-def pick_description(soup: BeautifulSoup, title: str) -> str:
-    candidates: list[str] = []
-
-    meta_description = first_meta_content(
-        soup,
-        [{"property": "og:description"}, {"name": "description"}, {"name": "twitter:description"}],
-    )
-    if meta_description:
-        candidates.append(meta_description)
-
-    selectors = [
-        ".detail",
-        ".details",
-        ".description",
-        ".item-description",
-        ".content",
-        "article",
-        "main",
-    ]
-
-    for selector in selectors:
-        for node in soup.select(selector):
-            text = clean_text(node.get_text(" ", strip=True))
-            if text:
-                candidates.append(text)
-
-    best = ""
-    for text in candidates:
-        if not text or text == title:
-            continue
-        if looks_like_noise(text):
-            continue
-        if len(text) < 20:
-            continue
-        best = text
-        break
-
-    if not best:
-        return ""
-
-    title_index = best.lower().find(title.lower())
-    if title and title_index == 0:
-        best = clean_text(best[len(title):])
-
-    if len(best) > 280:
-        best = best[:277].rstrip() + "..."
-
-    return best
-
-
 def fetch_listing_details(url: str) -> dict[str, str]:
     response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    page_text = clean_text(soup.get_text(" ", strip=True))
 
     title = (
-        first_meta_content(soup, [{"property": "og:title"}, {"name": "twitter:title"}])
+        first_meta_content(
+            soup,
+            [{"property": "og:title"}, {"name": "twitter:title"}],
+        )
         or (clean_text(soup.find("h1").get_text(" ", strip=True)) if soup.find("h1") else "")
         or clean_text(soup.title.get_text(" ", strip=True))
     )
-
-    description = pick_description(soup, title)
 
     image_url = first_meta_content(
         soup,
@@ -226,48 +122,20 @@ def fetch_listing_details(url: str) -> dict[str, str]:
         if image and image.get("src"):
             image_url = urljoin(url, image["src"])
 
-    phones = extract_phone_numbers(page_text)
-    location = extract_location(title, description, page_text)
-
-    info_parts: list[str] = []
-    if location:
-        info_parts.append("Ort: " + location)
-    if phones:
-        info_parts.append("Telefon: " + ", ".join(phones[:2]))
-    else:
-        info_parts.append("Kontakt: nur ueber Kontaktformular")
-
     return {
         "title": title or "Neue Anzeige",
-        "description": description,
         "image_url": image_url or "",
-        "info": "\n".join(info_parts),
     }
 
 
 def build_message(source_name: str, url: str, details: dict[str, str]) -> str:
-    lines = [f"Neue Anzeige auf {source_name}", details["title"]]
-
-    description = clean_text(details.get("description", ""))
-    if description:
-        lines.append("")
-        lines.append(description)
-
-    info = details.get("info", "").strip()
-    if info:
-        lines.append("")
-        lines.append(info)
-
-    lines.append("")
-    lines.append(url)
-
-    return "\n".join(lines)
+    return f"Neue Anzeige auf {source_name}\n{details['title']}\n{url}"
 
 
 def send_telegram_message(token: str, chat_id: str, message: str) -> None:
     response = requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
-        data={"chat_id": chat_id, "text": message, "disable_web_page_preview": "true"},
+        data={"chat_id": chat_id, "text": message, "disable_web_page_preview": "false"},
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
@@ -335,7 +203,7 @@ def process_source(
 
             print(f"[{source_name}] Gesendet: {url}")
         except Exception as exc:
-            fallback_message = f"Neue Anzeige auf {source_name}:\n{url}"
+            fallback_message = f"Neue Anzeige auf {source_name}\n{url}"
             send_telegram_message(token, chat_id, fallback_message)
             print(f"[{source_name}] Detailfehler ({exc}). Fallback gesendet: {url}")
 
