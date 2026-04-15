@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
@@ -68,6 +69,13 @@ def normalize_listing_url(base_url: str, href: str) -> str | None:
         return None
 
     return full_url
+
+
+def extract_listing_id(url: str) -> str | None:
+    match = re.search(r"_i(\d+)", url)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def extract_listing_urls(source_url: str, html: str) -> list[str]:
@@ -164,16 +172,30 @@ def fetch_source(source: dict[str, str]) -> list[str]:
     return extract_listing_urls(source["url"], response.text)
 
 
+def build_listing_records(listing_urls: list[str]) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+
+    for url in listing_urls:
+        listing_id = extract_listing_id(url)
+        if not listing_id or listing_id in seen_ids:
+            continue
+        seen_ids.add(listing_id)
+        records.append({"id": listing_id, "url": url})
+
+    return records
+
+
 def get_sleep_seconds() -> int:
     hour = datetime.now().hour
     if hour >= 23 or hour < 6:
-        return 1800
+        return 3600
     return 180
 
 
-def bootstrap_source(state: dict[str, list[str]], source_name: str, listings: list[str]) -> None:
+def bootstrap_source(state: dict[str, list[str]], source_name: str, listings: list[dict[str, str]]) -> None:
     if source_name not in state:
-        state[source_name] = listings
+        state[source_name] = [item["id"] for item in listings]
         print(f"[{source_name}] Erster Start: {len(listings)} Anzeigen gespeichert, nichts gesendet.")
 
 
@@ -184,14 +206,15 @@ def process_source(
     source: dict[str, str],
 ) -> None:
     source_name = source["name"]
-    listings = fetch_source(source)
+    listings = build_listing_records(fetch_source(source))
     print(f"[{source_name}] {len(listings)} Anzeigen gefunden.")
 
     bootstrap_source(state, source_name, listings)
     previous = set(state.get(source_name, []))
-    new_listings = [url for url in listings if url not in previous]
+    new_listings = [item for item in listings if item["id"] not in previous]
 
-    for url in new_listings:
+    for item in new_listings:
+        url = item["url"]
         try:
             details = fetch_listing_details(url)
             message = build_message(source_name, url, details)
@@ -207,7 +230,7 @@ def process_source(
             send_telegram_message(token, chat_id, fallback_message)
             print(f"[{source_name}] Detailfehler ({exc}). Fallback gesendet: {url}")
 
-    state[source_name] = listings
+    state[source_name] = [item["id"] for item in listings]
 
 
 def main() -> None:
