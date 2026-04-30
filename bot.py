@@ -15,6 +15,8 @@ SOURCES = [
     {"name": "ELW", "url": "https://www.elw-verschenkmarkt.de/"},
     {"name": "Hanau", "url": "https://hanau.verschenkmarkt.info/"},
     {"name": "Offenbach", "url": "https://region-offenbach.verschenkmarkt.info/"},
+    {"name": "Bad Homburg", "url": "https://www.verschenkmarkt-bad-homburg.de/"},
+    {"name": "BSO", "url": "https://www.bso-verschenkmarkt.de/"},
 ]
 
 HEADERS = {
