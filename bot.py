@@ -1,7 +1,7 @@
 import json
 import os
-import time
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
@@ -39,7 +39,7 @@ def require_env(name: str) -> str:
     return value
 
 
-def load_state() -> dict[str, list[str]]:
+def load_state() -> dict[str, dict[str, list[str]]]:
     if not STATE_FILE.exists():
         return {}
 
@@ -49,14 +49,32 @@ def load_state() -> dict[str, list[str]]:
     if not isinstance(data, dict):
         return {}
 
-    clean_state: dict[str, list[str]] = {}
-    for key, value in data.items():
-        if isinstance(key, str) and isinstance(value, list):
-            clean_state[key] = [item for item in value if isinstance(item, str)]
-    return clean_state
+    normalized: dict[str, dict[str, list[str]]] = {}
+
+    for source_name, value in data.items():
+        if not isinstance(source_name, str):
+            continue
+
+        if isinstance(value, list):
+            normalized[source_name] = {
+                "seen_ids": [item for item in value if isinstance(item, str)],
+                "last_ids": [item for item in value if isinstance(item, str)],
+            }
+            continue
+
+        if isinstance(value, dict):
+            seen_ids = value.get("seen_ids", [])
+            last_ids = value.get("last_ids", [])
+            if isinstance(seen_ids, list) and isinstance(last_ids, list):
+                normalized[source_name] = {
+                    "seen_ids": [item for item in seen_ids if isinstance(item, str)],
+                    "last_ids": [item for item in last_ids if isinstance(item, str)],
+                }
+
+    return normalized
 
 
-def save_state(state: dict[str, list[str]]) -> None:
+def save_state(state: dict[str, dict[str, list[str]]]) -> None:
     with STATE_FILE.open("w", encoding="utf-8") as file:
         json.dump(state, file, ensure_ascii=False, indent=2)
 
@@ -107,6 +125,60 @@ def first_meta_content(soup: BeautifulSoup, attrs_list: list[dict[str, str]]) ->
     return None
 
 
+def pick_best_image_url(soup: BeautifulSoup, page_url: str) -> str:
+    meta_image = first_meta_content(
+        soup,
+        [{"property": "og:image"}, {"name": "twitter:image"}],
+    )
+    if meta_image:
+        return urljoin(page_url, meta_image)
+
+    image_candidates: list[str] = []
+    skip_words = [
+        "logo",
+        "banner",
+        "header",
+        "icon",
+        "sprite",
+        "placeholder",
+        "default",
+    ]
+
+    containers = [
+        soup.select_one("article"),
+        soup.select_one("main"),
+        soup.select_one(".content"),
+        soup.select_one(".detail"),
+        soup.select_one(".details"),
+    ]
+
+    for container in containers:
+        if not container:
+            continue
+        for img in container.find_all("img"):
+            src = img.get("src") or img.get("data-src") or img.get("data-original")
+            if not src:
+                continue
+            full_src = urljoin(page_url, src)
+            lowered = full_src.lower()
+            if any(word in lowered for word in skip_words):
+                continue
+            image_candidates.append(full_src)
+
+    if not image_candidates:
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src") or img.get("data-original")
+            if not src:
+                continue
+            full_src = urljoin(page_url, src)
+            lowered = full_src.lower()
+            if any(word in lowered for word in skip_words):
+                continue
+            image_candidates.append(full_src)
+
+    return image_candidates[0] if image_candidates else ""
+
+
 def fetch_listing_details(url: str) -> dict[str, str]:
     response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
@@ -122,19 +194,11 @@ def fetch_listing_details(url: str) -> dict[str, str]:
         or clean_text(soup.title.get_text(" ", strip=True))
     )
 
-    image_url = first_meta_content(
-        soup,
-        [{"property": "og:image"}, {"name": "twitter:image"}],
-    )
-
-    if not image_url:
-        image = soup.find("img")
-        if image and image.get("src"):
-            image_url = urljoin(url, image["src"])
+    image_url = pick_best_image_url(soup, url)
 
     return {
         "title": title or "Neue Anzeige",
-        "image_url": image_url or "",
+        "image_url": image_url,
     }
 
 
@@ -195,16 +259,24 @@ def get_sleep_seconds() -> int:
     return 180
 
 
-def bootstrap_source(state: dict[str, list[str]], source_name: str, listings: list[dict[str, str]]) -> None:
+def bootstrap_source(
+    state: dict[str, dict[str, list[str]]],
+    source_name: str,
+    listings: list[dict[str, str]],
+) -> None:
     if source_name not in state:
-        state[source_name] = [item["id"] for item in listings]
+        listing_ids = [item["id"] for item in listings]
+        state[source_name] = {
+            "seen_ids": listing_ids,
+            "last_ids": listing_ids,
+        }
         print(f"[{source_name}] Erster Start: {len(listings)} Anzeigen gespeichert, nichts gesendet.")
 
 
 def process_source(
     token: str,
     chat_id: str,
-    state: dict[str, list[str]],
+    state: dict[str, dict[str, list[str]]],
     source: dict[str, str],
 ) -> None:
     source_name = source["name"]
@@ -212,8 +284,13 @@ def process_source(
     print(f"[{source_name}] {len(listings)} Anzeigen gefunden.")
 
     bootstrap_source(state, source_name, listings)
-    previous = set(state.get(source_name, []))
-    new_listings = [item for item in listings if item["id"] not in previous]
+
+    source_state = state[source_name]
+    seen_ids = set(source_state.get("seen_ids", []))
+    current_ids = [item["id"] for item in listings]
+    current_id_set = set(current_ids)
+
+    new_listings = [item for item in listings if item["id"] not in seen_ids]
 
     for item in new_listings:
         url = item["url"]
@@ -232,7 +309,9 @@ def process_source(
             send_telegram_message(token, chat_id, fallback_message)
             print(f"[{source_name}] Detailfehler ({exc}). Fallback gesendet: {url}")
 
-    state[source_name] = [item["id"] for item in listings]
+    updated_seen_ids = seen_ids | current_id_set
+    source_state["seen_ids"] = sorted(updated_seen_ids)
+    source_state["last_ids"] = current_ids
 
 
 def main() -> None:
